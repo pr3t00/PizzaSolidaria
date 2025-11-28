@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { AppData, UserRole, Order } from './types';
 import * as storage from './services/storageService';
+import { isFirebaseConfigured } from './services/firebaseConfig';
 import { Dashboard } from './components/Dashboard';
 import { OrderEntry } from './components/OrderEntry';
 import { RangeList } from './components/RangeList';
 import { Settings } from './components/Settings';
-import { LayoutDashboard, List, PlusCircle, Settings as SettingsIcon, Pizza } from 'lucide-react';
+import { LayoutDashboard, List, PlusCircle, Settings as SettingsIcon, Pizza, Database, AlertTriangle } from 'lucide-react';
 
 // Simple Router Type
 type View = 'DASHBOARD' | 'RANGES' | 'ENTRY' | 'SETTINGS';
@@ -142,7 +143,7 @@ const App: React.FC = () => {
       </nav>
 
       {/* Main Content */}
-      <main className="flex-1 p-4 md:p-8 pb-24 md:pb-8 overflow-y-auto">
+      <main className="flex-1 p-4 md:p-8 pb-24 md:pb-8 overflow-y-auto relative">
         <header className="mb-8 flex justify-between items-center md:hidden">
            <div className="flex items-center gap-2">
               <div className="bg-orange-500 p-1.5 rounded text-white">
@@ -151,6 +152,19 @@ const App: React.FC = () => {
               <h1 className="font-bold text-lg">Pizza Solidária</h1>
            </div>
         </header>
+
+        {!isFirebaseConfigured && (
+          <div className="bg-yellow-50 border border-yellow-200 text-yellow-800 px-4 py-3 rounded-lg mb-6 flex items-start gap-3">
+             <AlertTriangle className="flex-shrink-0 mt-0.5" size={20} />
+             <div>
+               <p className="font-bold text-sm">Modo de Demonstração (Offline)</p>
+               <p className="text-xs mt-1">
+                 O banco de dados não está configurado. Os dados estão sendo salvos apenas no seu navegador.
+                 Para ativar o modo online, configure o arquivo <code>services/firebaseConfig.ts</code>.
+               </p>
+             </div>
+          </div>
+        )}
 
         {currentView === 'DASHBOARD' && <Dashboard data={data} />}
         

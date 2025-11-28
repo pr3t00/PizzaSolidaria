@@ -1,6 +1,18 @@
 import { AppData, Flavor, Order, OrderStatus } from '../types';
+import { db, isFirebaseConfigured } from './firebaseConfig';
+import { 
+  collection, 
+  getDocs, 
+  setDoc, 
+  deleteDoc, 
+  doc, 
+  writeBatch
+} from 'firebase/firestore';
 
-const STORAGE_KEY = 'pizza_tracker_db_v2'; // Bumped version to ensure clean slate or force migration logic
+// --- CONSTANTES ---
+const COLL_ORDERS = 'orders';
+const COLL_FLAVORS = 'flavors';
+const LS_KEY = 'pizza_solidaria_data_v2'; // Key para LocalStorage
 
 const INITIAL_FLAVORS: Flavor[] = [
   { id: '1', name: 'Mussarela' },
@@ -10,107 +22,206 @@ const INITIAL_FLAVORS: Flavor[] = [
   { id: '5', name: 'Marguerita' },
 ];
 
-const INITIAL_DATA: AppData = {
-  orders: [],
-  flavors: INITIAL_FLAVORS,
+// --- HELPER LOCAL STORAGE ---
+const getLocalData = (): AppData => {
+  const saved = localStorage.getItem(LS_KEY);
+  if (saved) {
+    return JSON.parse(saved);
+  }
+  return { orders: [], flavors: INITIAL_FLAVORS };
 };
 
-// Simulate API delay
-const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const saveLocalData = (data: AppData) => {
+  localStorage.setItem(LS_KEY, JSON.stringify(data));
+};
+
+// --- HELPER FIREBASE ---
+const mapDocToOrder = (doc: any): Order => {
+  const data = doc.data();
+  return {
+    id: doc.id,
+    number: data.number,
+    team: data.team,
+    flavor: data.flavor,
+    status: data.status,
+    timestamp: data.timestamp
+  };
+};
+
+// --- API ---
 
 export const getAppData = async (): Promise<AppData> => {
-  await delay(300); // Fake network latency
-  
-  // Try to get v2 data first
-  let stored = localStorage.getItem(STORAGE_KEY);
-  
-  // Migration Logic: Check if v1 data exists and v2 doesn't
-  if (!stored) {
-    const oldData = localStorage.getItem('pizza_tracker_db_v1');
-    if (oldData) {
-      const parsedOld = JSON.parse(oldData);
-      // Migrate old format to new format
-      const migratedOrders = parsedOld.orders.map((o: any) => ({
-        id: o.id,
-        number: o.number,
-        flavor: o.flavor,
-        team: o.team,
-        timestamp: o.timestamp,
-        // Convert boolean to Status
-        status: o.isDelivered ? 'DELIVERED' : 'PENDING'
-      }));
-      
-      const migratedData = { ...parsedOld, orders: migratedOrders };
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(migratedData));
-      return migratedData as AppData;
-    }
-    
-    // If no old data either, init fresh
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(INITIAL_DATA));
-    return INITIAL_DATA;
+  // MODO LOCAL
+  if (!isFirebaseConfigured) {
+    console.warn("Firebase não configurado. Usando LocalStorage.");
+    return getLocalData();
   }
-  
-  return JSON.parse(stored);
+
+  // MODO FIREBASE
+  try {
+    // 1. Buscar Pedidos
+    const ordersSnapshot = await getDocs(collection(db, COLL_ORDERS));
+    const orders: Order[] = ordersSnapshot.docs.map(mapDocToOrder);
+    
+    // 2. Buscar Sabores
+    const flavorsSnapshot = await getDocs(collection(db, COLL_FLAVORS));
+    let flavors: Flavor[] = flavorsSnapshot.docs.map(doc => ({ 
+      id: doc.id, 
+      name: doc.data().name 
+    }));
+
+    // Se não tiver sabores no banco (primeira vez), cadastra os iniciais
+    if (flavors.length === 0) {
+      const batch = writeBatch(db);
+      const newFlavors: Flavor[] = [];
+      
+      INITIAL_FLAVORS.forEach(f => {
+        const docRef = doc(collection(db, COLL_FLAVORS));
+        batch.set(docRef, { name: f.name });
+        newFlavors.push({ id: docRef.id, name: f.name });
+      });
+      
+      await batch.commit();
+      flavors = newFlavors;
+    }
+
+    return { orders, flavors };
+  } catch (error) {
+    console.error("Erro ao conectar com Firebase:", error);
+    // Fallback silencioso para não quebrar a UI
+    return { orders: [], flavors: [] };
+  }
 };
 
 export const saveOrder = async (order: Order): Promise<AppData> => {
-  const currentData = await getAppData();
-  
-  // Check if ID exists (update) or New based on Number
-  const existingIndex = currentData.orders.findIndex(o => Number(o.number) === Number(order.number));
-  
-  let newOrders = [...currentData.orders];
-  if (existingIndex >= 0) {
-    const existingId = newOrders[existingIndex].id;
-    newOrders[existingIndex] = { ...order, id: existingId };
-  } else {
-    newOrders.push(order);
+  // MODO LOCAL
+  if (!isFirebaseConfigured) {
+    const data = getLocalData();
+    // Remove se já existir (update)
+    const otherOrders = data.orders.filter(o => Number(o.number) !== Number(order.number));
+    const newData = {
+      ...data,
+      orders: [...otherOrders, order]
+    };
+    saveLocalData(newData);
+    return newData;
   }
 
-  const newData = { ...currentData, orders: newOrders };
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(newData));
-  return newData;
+  // MODO FIREBASE
+  try {
+    const docRef = doc(db, COLL_ORDERS, String(order.number));
+    await setDoc(docRef, {
+      number: Number(order.number),
+      team: order.team || '',
+      flavor: order.flavor,
+      status: order.status,
+      timestamp: order.timestamp
+    });
+    return await getAppData();
+  } catch (error) {
+    console.error("Erro ao salvar pedido:", error);
+    throw error;
+  }
 };
 
 export const deleteOrder = async (number: number): Promise<AppData> => {
-  const currentData = await getAppData();
-  const newOrders = currentData.orders.filter(o => Number(o.number) !== Number(number));
-  
-  const newData = { ...currentData, orders: newOrders };
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(newData));
-  return newData;
+  // MODO LOCAL
+  if (!isFirebaseConfigured) {
+    const data = getLocalData();
+    const newData = {
+      ...data,
+      orders: data.orders.filter(o => Number(o.number) !== Number(number))
+    };
+    saveLocalData(newData);
+    return newData;
+  }
+
+  // MODO FIREBASE
+  try {
+    await deleteDoc(doc(db, COLL_ORDERS, String(number)));
+    return await getAppData();
+  } catch (error) {
+    console.error("Erro ao excluir pedido:", error);
+    throw error;
+  }
 };
 
-// Cycles: PENDING -> DELIVERED -> RETURNED -> PENDING
 export const cycleOrderStatus = async (orderNumber: number): Promise<AppData> => {
-  const currentData = await getAppData();
-  const newOrders = currentData.orders.map(o => {
-    if (Number(o.number) === Number(orderNumber)) {
+  // MODO LOCAL
+  if (!isFirebaseConfigured) {
+    const data = getLocalData();
+    const updatedOrders = data.orders.map(o => {
+      if (Number(o.number) === Number(orderNumber)) {
+        let nextStatus: OrderStatus = 'PENDING';
+        if (o.status === 'PENDING') nextStatus = 'DELIVERED';
+        else if (o.status === 'DELIVERED') nextStatus = 'RETURNED';
+        else if (o.status === 'RETURNED') nextStatus = 'PENDING';
+        return { ...o, status: nextStatus };
+      }
+      return o;
+    });
+    const newData = { ...data, orders: updatedOrders };
+    saveLocalData(newData);
+    return newData;
+  }
+
+  // MODO FIREBASE
+  try {
+    const currentData = await getAppData();
+    const order = currentData.orders.find(o => Number(o.number) === Number(orderNumber));
+    
+    if (order) {
       let nextStatus: OrderStatus = 'PENDING';
-      if (o.status === 'PENDING') nextStatus = 'DELIVERED';
-      else if (o.status === 'DELIVERED') nextStatus = 'RETURNED';
-      else if (o.status === 'RETURNED') nextStatus = 'PENDING';
-      
-      return { ...o, status: nextStatus };
+      if (order.status === 'PENDING') nextStatus = 'DELIVERED';
+      else if (order.status === 'DELIVERED') nextStatus = 'RETURNED';
+      else if (order.status === 'RETURNED') nextStatus = 'PENDING';
+
+      const docRef = doc(db, COLL_ORDERS, String(orderNumber));
+      await setDoc(docRef, { status: nextStatus }, { merge: true });
     }
-    return o;
-  });
-  const newData = { ...currentData, orders: newOrders };
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(newData));
-  return newData;
+
+    return await getAppData();
+  } catch (error) {
+    console.error("Erro ao atualizar status:", error);
+    throw error;
+  }
 };
 
 export const addFlavor = async (name: string): Promise<AppData> => {
-  const currentData = await getAppData();
-  const newFlavor: Flavor = { id: Date.now().toString(), name };
-  const newData = { ...currentData, flavors: [...currentData.flavors, newFlavor] };
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(newData));
-  return newData;
+  // MODO LOCAL
+  if (!isFirebaseConfigured) {
+    const data = getLocalData();
+    const newFlavor = { id: Date.now().toString(), name };
+    const newData = { ...data, flavors: [...data.flavors, newFlavor] };
+    saveLocalData(newData);
+    return newData;
+  }
+
+  // MODO FIREBASE
+  try {
+    await setDoc(doc(collection(db, COLL_FLAVORS)), { name });
+    return await getAppData();
+  } catch (error) {
+    console.error("Erro ao adicionar sabor:", error);
+    throw error;
+  }
 };
 
 export const removeFlavor = async (id: string): Promise<AppData> => {
-  const currentData = await getAppData();
-  const newData = { ...currentData, flavors: currentData.flavors.filter(f => f.id !== id) };
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(newData));
-  return newData;
+  // MODO LOCAL
+  if (!isFirebaseConfigured) {
+    const data = getLocalData();
+    const newData = { ...data, flavors: data.flavors.filter(f => f.id !== id) };
+    saveLocalData(newData);
+    return newData;
+  }
+
+  // MODO FIREBASE
+  try {
+    await deleteDoc(doc(db, COLL_FLAVORS, id));
+    return await getAppData();
+  } catch (error) {
+    console.error("Erro ao remover sabor:", error);
+    throw error;
+  }
 };
